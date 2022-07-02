@@ -1,138 +1,245 @@
-# Проект 2
-Опишите здесь поэтапно ход решения задачи. Вы можете ориентироваться на тот план выполнения проекта, который мы предлагаем в инструкции на платформе.
-## shipping_country
-```
-CREATE TABLE public.shipping_country(
-    shipping_country_id serial primary key ,
-    shipping_country text,
-    shipping_country_base_rate numeric(14,3)
-);
-insert into public.shipping_country(shipping_country, shipping_country_base_rate)
-select distinct shipping_country, shipping_country_base_rate from public.shipping;
-```
-## shipping_agreement
-```
-CREATE TABLE public.shipping_agreement(
-    agreementid int primary key ,
-    agreement_number text,
-    agreement_rate numeric(14,2),
-    agreement_commission numeric(14,2)
-);
-insert into public.shipping_agreement(agreementid, agreement_number, agreement_rate, agreement_commission)
-select  distinct splitted[1]::bigint, splitted[2]::text, splitted[3]::numeric, splitted[4]::numeric
-from (
-select regexp_split_to_array(vendor_agreement_description , E'\\:+') as splitted
-from public.shipping) t1
-order by 1;
-```
+# Проект 3
+from sqlalchemy import create_engine
+import requests
+import json
+import pandas as pd
+from datetime import datetime, timedelta
+from airflow import DAG
+from airflow.operators.python_operator import PythonOperator, BranchPythonOperator
+from airflow.providers.postgres.hooks.postgres import PostgresHook
+import logging
+logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)s:%(levelname)s:%(message)s')
+base_url = 'https://d5dg1j9kt695d30blp03.apigw.yandexcloud.net'
+api_key = '5f55e6c0-e9e5-4a9c-b313-63c01fc31460'
+nickname = 'Sinter01'
+cohort = '1'
 
-## shipping_transfer
-```
-CREATE TABLE public.shipping_transfer (
-    transfer_type_id serial  primary key ,
-    transfer_type text,
-    transfer_model text,
-    shipping_transfer_rate  numeric(14,3)
-);
-insert into public.shipping_transfer(transfer_type, transfer_model, shipping_transfer_rate)
-select splitted[1]::text, splitted[2]::text, shipping_transfer_rate
-from (
-    select distinct regexp_split_to_array(shipping_transfer_description , E'\\:+') as splitted , shipping_transfer_rate
-    from public.shipping) t1
-order by 1;
-```
+headers = {
+    'X-Nickname': nickname,
+    'X-Cohort': cohort,
+    'X-Project': 'True',
+    'X-API-KEY': api_key,
+    'Content-Type': 'application/x-www-form-urlencoded'
+}
 
-## shipping_info
-```
-CREATE TABLE public.shipping_info (
-    shippingid bigint  ,
-    vendor_id int,
-    payment_amount numeric(14,2),
-    shipping_plan_datetime  timestamp,
-    transfer_type_id int references public.shipping_transfer(transfer_type_id),
-    shipping_country_id int references public.shipping_country(shipping_country_id),
-    agreementid int references public.shipping_agreement(agreementid)
-);
+engine = create_engine('postgresql+psycopg2://jovyan:jovyan@localhost/de')
+conn = engine.connect()
 
-insert into public.shipping_info(shippingid, vendor_id, payment_amount, shipping_plan_datetime, transfer_type_id, shipping_country_id, agreementid)
-select s.shippingid, s.vendorid, s.payment_amount, s.shipping_plan_datetime, st.transfer_type_id, sc.shipping_country_id, sa.agreementid
-from public.shipping s
-join public.shipping_transfer st on concat(st.transfer_type,':',st.transfer_model) = s.shipping_transfer_description
-join public.shipping_country sc on sc.shipping_country= s.shipping_country
-join public.shipping_agreement sa on sa.agreementid::text = (regexp_split_to_array(s.vendor_agreement_description , E'\\:+'))[1]::text;
-```
+postgres_conn_id = 'postgresql_de'
 
-## shipping_status
-```
-CREATE TABLE public.shipping_status (
-    shippingid bigint,
-    status text,
-    state text,
-    shipping_start_fact_datetime timestamp,
-    shipping_end_fact_datetime timestamp
-);
+def generate_report(ti):
+    logging.info('requesting reports')
+    response = requests.post(f'{base_url}/generate_report', headers=headers)
+    response.raise_for_status()
+    task_id = json.loads(response.content)['task_id']
+    ti.xcom_push(key='task_id', value=task_id)
+    logging.info(f'Response: {response.content}')
 
 
-insert into public.shipping_status(shippingid, status, state, shipping_start_fact_datetime, shipping_end_fact_datetime)
+def get_report(ti):
+    logging.info('get_report')
+    task_id = ti.xcom_pull(key='task_id')
 
-with state_status as (
-select t2.shippingid, t1.state, t1.status
-from shipping t1
-right join (select shippingid, max(state_datetime) as max_state_datetime
-from shipping
-group by shippingid) t2 on t1.shippingid = t2.shippingid and t1.state_datetime = t2.max_state_datetime),
-    booked_revieved as (
-select t1.shippingid, state_datetime as shipping_start_fact_datetim,shipping_end_fact_datetime
-from shipping t1
-left join (select shippingid, state_datetime as shipping_end_fact_datetime
-            from shipping
-            where state = 'recieved') t2 on t1.shippingid = t2.shippingid
-where state = 'booked')
+    report_id = None
 
-select ss.shippingid, ss.status, ss.state, br.shipping_start_fact_datetim, br.shipping_end_fact_datetime
-from state_status as ss
-join booked_revieved as br using(shippingid);
-```
+    response = requests.get(
+        f"https://d5dg1j9kt695d30blp03.apigw.yandexcloud.net/get_report?task_id='MjAyMi0wNy0wMlQxNzoxMDozNwlTaW50ZXIwMQ=='",
+        headers={
+            "X-API-KEY": "5f55e6c0-e9e5-4a9c-b313-63c01fc31460",
+            "X-Nickname": "Sinter01",
+            "X-Project": "True",
+            "X-Cohort": "1"
+        }
+    )
+    report_id = json.loads(response.content)['data']['report_id']
 
-## shipping_datamart
-```
-drop table public.shipping_datamart;
-CREATE TABLE public.shipping_datamart (
-    shippingid bigint,
-    vendorid bigint,
-    transfer_type text,
-    full_day_at_shipping int,
-    is_delay int,
-    is_shipping_finish int,
-    delay_day_at_shipping int,
-    payment_amount numeric(14,2),
-    vat numeric(14,6),
-    profit numeric(14,6)
-);
-insert into public.shipping_datamart(shippingid, vendorid, transfer_type, full_day_at_shipping, is_delay, is_shipping_finish, delay_day_at_shipping, payment_amount, vat, profit)
-select si.shippingid, si.vendor_id, st.transfer_type,
-       date_part('day', age(shipping_end_fact_datetime,shipping_start_fact_datetime)) as full_day_at_shipping,
-        CASE
-            WHEN shipping_end_fact_datetime > si.shipping_plan_datetime THEN 1
-            ELSE 0
-        END  as is_delay,
+    ti.xcom_push(key='report_id', value=report_id)
+    logging.info(f'Report_id={report_id}')
 
-        CASE
-            WHEN status = 'finished' THEN 1
-            ELSE 0
-        END  as is_shipping_finish,
 
-        CASE
-            WHEN ss.shipping_end_fact_datetime > si.shipping_plan_datetime  THEN date_part('day', age(ss.shipping_end_fact_datetime,si.shipping_plan_datetime))
-            ELSE 0
-        END  as delay_day_at_shipping,
-        si.payment_amount,
-        si.payment_amount * (sc.shipping_country_base_rate +sa.agreement_rate +st.shipping_transfer_rate) as vat,
-        si.payment_amount * sa.agreement_commission as profit
+def get_files(filename, date, pg_table, ti):
+    report_id = ti.xcom_pull(key='report_id')
+    s3_filename = f'https://storage.yandexcloud.net/s3-slogging.info3/cohort_{cohort}/{nickname}/project/{report_id}/{filename}'
+    local_filename = '/lessons/' + date.replace('-', '') + '_' + filename
+    response = requests.get(s3_filename)
+    open(f"{local_filename}", "wb").write(response.content)
 
-from public.shipping_info si
-join public.shipping_transfer st using(transfer_type_id)
-join public.shipping_status ss using(shippingid)
-join public.shipping_country sc using(shipping_country_id)
-join public.shipping_agreement sa using(agreementid);
-```
+    df = pd.read_csv(local_filename)
+    df.drop_duplicates(subset=['id'])
+
+    df.to_sql(pg_table, engine, schema='staging', if_exists='append', index=False)
+
+
+
+def insert_mart(path_to_mart):
+    query = open(path_to_mart).read()
+    conn.execute(query)
+
+
+
+def get_increment(date, ti):
+    logging.info('Making request get_increment')
+    report_id = ti.xcom_pull(key='report_id')
+    response = requests.get(
+        f'{base_url}/get_increment?report_id={report_id}&date={str(date)}T00:00:00',
+        headers=headers)
+    response.raise_for_status()
+    logging.info(f'Response is {response.content}')
+
+    increment_id = json.loads(response.content)['data']['increment_id']
+    ti.xcom_push(key='increment_id', value=increment_id)
+    logging.info(f'increment_id={increment_id}')
+
+
+
+def get_increment_files(filename, date, pg_table, ti):
+    increment_id = ti.xcom_pull(key='increment_id')
+    s3_filename = f'https://storage.yandexcloud.net/s3-slogging.info3/cohort_{cohort}/{nickname}/project/{increment_id}/{filename}'
+
+    local_filename = date.replace('-', '') + '_' + filename
+
+    response = requests.get(s3_filename)
+    open(f"{local_filename}", "wb").write(response.content)
+
+    df = pd.read_csv(local_filename)
+    df.drop_duplicates()
+
+    postgres_hook = PostgresHook(postgres_conn_id)
+    engine = postgres_hook.get_sqlalchemy_engine()
+    df.to_sql(pg_table, engine, schema='staging', if_exists='append', index=False)
+
+
+args = {
+    "owner": "sinter",
+    'email': ['semion.polonskii@yandex.ru'],
+    'email_on_failure': False,
+    'email_on_retry': False,
+    'retries': 0
+}
+
+business_dt = '{{ ds }}'
+
+with DAG(
+        default_args=args,
+        description='ETL',
+        catchup=False,
+        start_date=datetime.today() - timedelta(days=8),
+        end_date=datetime.today() - timedelta(days=1),
+) as dag:
+    user_order_log_cr = PostgresOperator(
+        task_id='user_order_log_cr',
+        postgres_conn_id=postgres_conn_id,
+        sql='/migration/staging.user_order_log.sql')
+
+    customer_research_cr = PostgresOperator(
+        task_id='customer_research_cr',
+        postgres_conn_id=postgres_conn_id,
+        sql='/migrations/staging.customer_research.sql')
+
+    user_activity_log_cr = PostgresOperator(
+        task_id='user_activity_log_cr',
+        postgres_conn_id=postgres_conn_id,
+        sql='/migrations/user_activity_log.sql')
+
+    generate_report = PythonOperator(
+        task_id='generate_report',
+        python_callable=generate_report)
+
+    get_report = PythonOperator(
+        task_id='get_report',
+        python_callable=get_report)
+    get_user_orders_log = PythonOperator(
+        task_id='get_user_order_log',
+        python_callable=get_files,
+        op_kwargs={'filename': 'user_orders_log.csv',
+                   'pg_table': 'user_order_log',
+                   'date': business_dt})
+
+    get_user_activity_log = PythonOperator(
+        task_id='get_user_activity_log',
+        python_callable=get_files,
+        op_kwargs={'filename': 'user_activity_log.csv',
+                   'pg_table': 'user_activity_log',
+                   'date': business_dt})
+
+    get_customer_research = PythonOperator(
+        task_id='get_customer_research',
+        python_callable=get_files,
+        op_kwargs={'filename': 'customer_research.csv',
+                   'pg_table': 'customer_research',
+                   'date': business_dt})
+
+    insert_mart_d_city = PostgresOperator(
+        task_id='insert_d_city',
+        postgres_conn_id=postgres_conn_id,
+        sql='/migrations/mart.d_city.sql')
+
+    insert_mart_d_customer = PostgresOperator(
+        task_id='insert_d_customer',
+        postgres_conn_id=postgres_conn_id,
+        sqls='/migrations/mart.d_customer.sql')
+
+    insert_mart_d_item = PostgresOperator(
+        task_id='insert_d_item',
+        postgres_conn_id=postgres_conn_id,
+        sql='/migrations/mart.d_item.sql')
+
+    insert_mart_f_sales = PostgresOperator(
+        task_id='insert_f_sales',
+        postgres_conn_id=postgres_conn_id,
+        sql='/migrations/mart.f_sales.sql')
+
+    get_increment = PythonOperator(
+        task_id='get_increment',
+        python_callable=get_increment,
+        op_kwargs={'date': business_dt})
+
+    get_user_orders_log_inc = PythonOperator(
+        task_id='get_user_order_log_inc',
+        python_callable=get_increment_files,
+        op_kwargs={'filename': 'user_orders_log_inc.csv',
+                   'pg_table': 'user_order_log',
+                   'date': business_dt})
+
+    get_user_activity_log_inc = PythonOperator(
+        task_id='get_user_activity_log_inc',
+        python_callable=get_increment_files,
+        op_kwargs={'filename': 'user_activity_log_inc.csv',
+                   'pg_table': 'user_activity_log',
+                   'date': business_dt})
+
+    get_customer_research_inc = PythonOperator(
+        task_id='get_customer_research_inc',
+        python_callable=get_increment_files,
+        op_kwargs={'filename': 'customer_research_inc.csv',
+                   'pg_table': 'customer_research',
+                   'date': business_dt})
+
+    change_schema = PostgresOperator(
+        task_id='change_schema',
+        postgres_conn_id=postgres_conn_id,
+        sql='/migrations/change_schema.sql')
+
+    insert_mart_f_sales_new = PostgresOperator(
+        task_id='insert_f_sales',
+        postgres_conn_id=postgres_conn_id,
+        sql='/migrations/mart.f_sales_new.sql')
+
+    (
+            [user_order_log_cr, customer_research_cr, user_activity_log_cr] >>
+            generate_report >>
+            get_report >>
+            [get_user_orders_log, get_user_activity_log, get_customer_research] >>
+            insert_mart_d_city >>
+            [insert_mart_d_customer, insert_mart_d_item] >>
+            insert_mart_f_sales >>
+            get_increment >>
+            [get_user_orders_log_inc, get_user_activity_log_inc, get_customer_research_inc] >>
+            change_schema >>
+            get_increment >>
+            [get_user_orders_log_inc, get_user_activity_log_inc, get_customer_research_inc] >>
+            insert_mart_d_city >>
+            [insert_mart_d_customer, insert_mart_d_item] >>
+            insert_mart_f_sales_new
+    )
