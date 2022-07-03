@@ -45,12 +45,7 @@ def get_report(ti):
 
     response = requests.get(
         f"https://d5dg1j9kt695d30blp03.apigw.yandexcloud.net/get_report?task_id='MjAyMi0wNy0wMlQxNzoxMDozNwlTaW50ZXIwMQ=='",
-        headers={
-            "X-API-KEY": "5f55e6c0-e9e5-4a9c-b313-63c01fc31460",
-            "X-Nickname": "Sinter01",
-            "X-Project": "True",
-            "X-Cohort": "1"
-        }
+        headers=headers
     )
     report_id = json.loads(response.content)['data']['report_id']
 
